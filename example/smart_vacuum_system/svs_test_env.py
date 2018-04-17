@@ -43,6 +43,8 @@ class SVSStateObserver(Callback):
 class SVSActionProvider(ActionProvider):
 
     def actions(self, state):
+        if not isinstance(state[0], float):
+            state = state[0]
         semantic_state = State.deserialize(state, 10, 10)
         free_positions = semantic_state.free_positions()
         actions = []

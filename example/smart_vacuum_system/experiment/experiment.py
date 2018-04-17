@@ -1,5 +1,5 @@
 from example.smart_vacuum_system.svs_test_env import SVSTestEnv
-from tfh.agents.ap_rl_agents import AdfpTester
+from tfh.agents.ap_rl_agents import AdfpTester, QLearningTester
 from learning_agents.adfp import DecreasingEpsilonGreedyPolicy, Policy, DefaultMemory, Goal
 from keras.layers import Dense, Flatten, Input, concatenate
 from keras.models import Model
@@ -10,6 +10,8 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import json
+from rl.policy import LinearAnnealedPolicy, EpsGreedyQPolicy
+from rl.memory import SequentialMemory
 
 
 class RandomPolicy(Policy):
@@ -74,6 +76,14 @@ class SVSProcessor(Processor):
     def process_measurement(self, measurement):
         return list(measurement)
 
+    def process_reward(self, reward):
+        return reward
+
+    def process_state_batch(self, batch):
+        """Processes an entire batch of states and returns it.
+        """
+        return batch
+
 
 def load_model(env_config):
     inputs_observation = Input(shape=env_config.observation_shape)
@@ -128,74 +138,118 @@ def process_failures(steps, failures):
     return {'avgs': avgs, 'stddev': stddev, 'maxima': maxima, 'minima' : minima}
 
 
-if __name__ == '__main__':
+def test_q_learner(goal):
+    failures = []
+    for i in range(epochs_per_tester):
+        inputs_observation = Input(shape=(1, 8))
+        flatten_inputs_observations = Flatten()(inputs_observation)
+        inputs_action = Input(shape=test_env.env_config.test_action_shape)
+        # hidden layers
+        merged = concatenate([flatten_inputs_observations, inputs_action])
+        hidden_1 = Dense(256, activation='relu')(merged)
+        hidden_2 = Dense(128, activation='relu')(hidden_1)
+        hidden_3 = Dense(64, activation='relu')(hidden_2)
+        # output layer
+        output = Dense(1, activation='linear')(hidden_3)
+        model = Model(inputs=[inputs_observation, inputs_action], outputs=output)
 
-    steps_per_epoch = 100000
-    epochs_per_tester = 10
+        q_policy = LinearAnnealedPolicy(EpsGreedyQPolicy(), attr='eps', value_max=1., value_min=.05, value_test=.05,
+                                        nb_steps=5000)
 
-    steps = np.linspace(0, steps_per_epoch, 100)
+        q_learning_tester = QLearningTester(env_config=test_env.env_config, policy=q_policy,
+                                            model=model, memory=SequentialMemory(limit=50000, window_length=1),
+                                            temporal_offsets=[1, 2, 5], log_interval=100, processor=SVSProcessor(),
+                                            goal=goal, optimizer=optimizer,
+                                            folder_path=q_learning_folder, metrics=metrics)
 
-    # Load test environment
-    weights_filename = '../dqn_SVS_weights_500k.h5f'
-    test_env = SVSTestEnv(weights_filename=weights_filename)
+        failures.append(q_learning_tester.fit(goal_param_func=collision_goal_param_func, nb_steps=steps_per_epoch,
+                                              test_env=test_env, nb_max_episode_steps=10))
+    return failures
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=['train', 'test'], default='train')
-    args = parser.parse_args()
 
-    optimizer = Adam(lr=1e-3)
-    metrics = ['mae']
-
-    # Standard Tester
-    tester_weights_folder = 'SVS_standard_tester_weights'
-
+def test_dfp():
     failures = []
     for i in range(epochs_per_tester):
         model = load_model(test_env.env_config)
         standard_tester = AdfpTester(env_config=test_env.env_config,
                                      policy=DecreasingEpsilonGreedyPolicy(steps=5000, start_eps=1, end_eps=0.05),
                                      model=model, memory=DefaultMemory(max_length=50000), temporal_offsets=[1, 2, 5],
-                                     log_interval=10000, processor=SVSProcessor(), goal=goal, optimizer=optimizer,
-                                     folder_path=tester_weights_folder, metrics=metrics)
+                                     log_interval=100, processor=SVSProcessor(), goal=collision_goal,
+                                     optimizer=optimizer, folder_path=dfp_folder, metrics=metrics)
 
         failures.append(standard_tester.fit(goal_param_func=collision_goal_param_func, nb_steps=steps_per_epoch,
                                             test_env=test_env, nb_max_episode_steps=10))
-    logs_standard = process_failures(steps=steps, failures=failures)
+    return failures
 
-    with open('standard_tester.json', 'w') as outfile:
-        json.dump(logs_standard, outfile)
 
-    # Independent Tester
-    tester_weights_folder = 'SVS_independent_tester_weights'
-
-    failures = []
-    for i in range(epochs_per_tester):
-        model = load_model(test_env.env_config)
-        independent_tester = AdfpTester(env_config=test_env.env_config,
-                                        policy=DecreasingEpsilonGreedyPolicy(steps=5000, start_eps=1, end_eps=0.05),
-                                        model=model, memory=DefaultMemory(max_length=50000), temporal_offsets=[1, 2, 5],
-                                        log_interval=10000, processor=SVSProcessor(), goal=collision_goal,
-                                        optimizer=optimizer, folder_path=tester_weights_folder, metrics=metrics)
-
-        failures.append(independent_tester.fit(goal_param_func=collision_goal_param_func, nb_steps=steps_per_epoch,
-                                               test_env=test_env, nb_max_episode_steps=10))
-    logs_independent_tester = process_failures(steps=steps, failures=failures)
-    with open('independent_tester.json', 'w') as outfile:
-        json.dump(logs_independent_tester, outfile)
-
-    # Random Tester
-    tester_weights_folder = 'SVS_random_tester_weights'
-
+def test_random():
     failures = []
     for i in range(epochs_per_tester):
         model = load_model(test_env.env_config)
         random_tester = AdfpTester(env_config=test_env.env_config, policy=RandomPolicy(), model=model,
                                    memory=DefaultMemory(max_length=50000), temporal_offsets=[1, 2, 5],
-                                   log_interval=10000, processor=SVSProcessor(), goal=goal, optimizer=optimizer,
-                                   folder_path='random_tester_folder', metrics=metrics)
+                                   log_interval=100, processor=SVSProcessor(), goal=goal, optimizer=optimizer,
+                                   folder_path=random_folder, metrics=metrics)
 
-        failures.append(random_tester.fit(goal_param_func=collision_goal_param_func, nb_steps=steps_per_epoch, test_env=test_env,
-                                          nb_max_episode_steps=10))
-    logs_random_tester = process_failures(steps=steps, failures=failures)
-    with open('random_tester.json', 'w') as outfile:
+        failures.append(
+            random_tester.fit(goal_param_func=collision_goal_param_func, nb_steps=steps_per_epoch, test_env=test_env,
+                              nb_max_episode_steps=10))
+    return failures
+
+
+def test_the_testers(step):
+    # QLearning Tester
+    q_learner_failures = test_q_learner(goal=collision_goal)
+    logs_q_learner = process_failures(steps=steps, failures=q_learner_failures)
+    with open('q_learning_tester_step_' + str(step) + '.json', 'w') as outfile:
+        json.dump(logs_q_learner, outfile)
+
+    # Standard Tester
+    standard_failures = test_dfp()
+    logs_dfp = process_failures(steps=steps, failures=standard_failures)
+    with open('dfp_tester_step_'+ str(step) + '.json', 'w') as outfile:
+        json.dump(logs_dfp, outfile)
+
+    # Random Tester
+    random_failures = test_random()
+    logs_random_tester = process_failures(steps=steps, failures=random_failures)
+    with open('random_tester_step_' + str(step) + '.json', 'w') as outfile:
         json.dump(logs_random_tester, outfile)
+
+
+if __name__ == '__main__':
+
+    # goals: collision_goal and goal
+
+    steps_per_epoch = 1000
+    epochs_per_tester = 10
+
+    steps = np.linspace(0, steps_per_epoch, 100)
+
+    optimizer = Adam(lr=1e-3)
+    metrics = ['mae']
+
+    q_learning_folder = 'SVS_q_learning_tester_weights'
+    dfp_folder = 'SVS_standard_tester_weights'
+    random_folder = 'SVS_random_tester_weights'
+
+    # Load test environment for 500k steps
+    weights_filename = '../dqn_SVS_weights_500k.h5f'
+    test_env = SVSTestEnv(weights_filename=weights_filename)
+
+    # test with the 3 testers
+    test_the_testers(1)
+
+    # Load test environment for 1000k steps
+    weights_filename = '../dqn_SVS_weights_1000k.h5f'
+    test_env = SVSTestEnv(weights_filename=weights_filename)
+
+    # test with the 3 testers again
+    test_the_testers(2)
+
+
+    # AdfpTester(env_config=test_env.env_config,
+            #                         policy=DecreasingEpsilonGreedyPolicy(steps=5000, start_eps=1, end_eps=0.05),
+            #                         model=model, memory=DefaultMemory(max_length=50000), temporal_offsets=[1, 2, 5],
+            #                         log_interval=100, processor=SVSProcessor(), goal=goal, optimizer=optimizer,
+            #                         folder_path=tester_weights_folder, metrics=metrics)
