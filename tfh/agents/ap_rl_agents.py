@@ -21,7 +21,7 @@ class Failure(object):
 class AdfpTester(TesterFromHell):
 
     def __init__(self, env_config, policy, model, memory, temporal_offsets, log_interval, goal, processor, optimizer,
-                 folder_path, metrics):
+                 folder_path, metrics, failure):
         self.folder_path = folder_path
         self.log_interval = log_interval
         self.env_config = env_config
@@ -30,6 +30,7 @@ class AdfpTester(TesterFromHell):
                                     temporal_offsets=temporal_offsets, target_model_update=100)
         self.adfp_agent.compile(optimizer=optimizer, metrics=metrics)
         self.processor = processor
+        self.failure = failure
 
     def fit(self, test_env: TestEnvironment, nb_steps, goal_param_func, nb_max_episode_steps=None):
 
@@ -57,9 +58,10 @@ class AdfpTester(TesterFromHell):
             measurements, observation, done = test_env.step(test_action)
 
             # Analyse resulting state
-            if point_in_rect(observation.obstacle_left_bottom, observation.obstacle_width,
-                             observation.obstacle_height, observation.robot_position):
+            #if point_in_rect(observation.obstacle_left_bottom, observation.obstacle_width,
+               #              observation.obstacle_height, observation.robot_position):
                 # TODO Generalize failure definitions
+            if self.failure(observation):
                 failures.append(Failure(episode=tester.episode, step=tester.step, record=None,
                                         type='Crash'))
 
@@ -90,7 +92,7 @@ class AdfpTester(TesterFromHell):
 class QLearningTester(TesterFromHell):
 
     def __init__(self, env_config, policy, model, memory, temporal_offsets, log_interval, goal, processor, optimizer,
-                 folder_path, metrics):
+                 folder_path, metrics, failure):
         self.folder_path = folder_path
         self.log_interval = log_interval
         self.env_config = env_config
@@ -101,6 +103,7 @@ class QLearningTester(TesterFromHell):
 
         self.agent.compile(optimizer=optimizer, metrics=metrics)
         self.processor = processor
+        self.failure = failure
 
     def fit(self, test_env: TestEnvironment, nb_steps, goal_param_func, nb_max_episode_steps=None):
 
@@ -130,9 +133,10 @@ class QLearningTester(TesterFromHell):
             measurements, observation, done = test_env.step(test_action)
 
             # Analyse resulting state
-            if point_in_rect(observation.obstacle_left_bottom, observation.obstacle_width,
-                             observation.obstacle_height, observation.robot_position):
+            #if point_in_rect(observation.obstacle_left_bottom, observation.obstacle_width,
+            #                 observation.obstacle_height, observation.robot_position):
                 # TODO Generalize failure definitions
+            if self.failure(observation):
                 failures.append(Failure(episode=tester.episode, step=tester.agent.step, record=None,
                                         type='Crash'))
 

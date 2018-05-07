@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 import json
 from rl.policy import LinearAnnealedPolicy, EpsGreedyQPolicy
 from rl.memory import SequentialMemory
+import os
+import pickle
 
 
 class RandomPolicy(Policy):
@@ -30,6 +32,16 @@ def collision_goal_param_func(test_env):
     current_state = test_env.env.state
     general_params = [current_state.obstacle_left_bottom[0], current_state.obstacle_left_bottom[1],
                       current_state.obstacle_width, current_state.obstacle_height]
+    factors = [[1], [1], [1]]
+    for factor in factors:
+        factor.extend(general_params)
+
+    return factors
+
+
+def collision_goal_param_func_v2(test_env):
+    current_state = test_env.env.state
+    general_params = [0.0, 1.0, 1, 1]
     factors = [[1], [1], [1]]
     for factor in factors:
         factor.extend(general_params)
@@ -85,7 +97,7 @@ class SVSProcessor(Processor):
         return batch
 
 
-def load_model(env_config):
+def load_dfp_model(env_config, policy):
     inputs_observation = Input(shape=env_config.observation_shape)
     inputs_action = Input(shape=env_config.test_action_shape)
     inputs_goal = Input(shape=GOAL_PARAM_SHAPE)
@@ -98,8 +110,38 @@ def load_model(env_config):
     # output layer
     output = Dense(len(TEMPORAL_OFFSETS) * env_config.system_actions, activation='linear')(hidden_3)
     model = Model(inputs=[inputs_observation, inputs_action, inputs_goal], outputs=output)
+    #print(model.summary())
 
-    return model
+    tester = AdfpTester(env_config=test_env.env_config,
+                        policy=policy,
+                        model=model, memory=DefaultMemory(max_length=50000), temporal_offsets=[1, 2, 5],
+                        log_interval=steps_per_epoch, processor=SVSProcessor(), goal=collision_goal,
+                        optimizer=optimizer, folder_path=dfp_folder, metrics=metrics, failure=failure_1)
+
+    return tester
+
+
+def load_q_model(env_config, policy):
+    inputs_observation = Input(shape=(1, 8))
+    flatten_inputs_observations = Flatten()(inputs_observation)
+    inputs_action = Input(shape=test_env.env_config.test_action_shape)
+    # hidden layers
+    merged = concatenate([flatten_inputs_observations, inputs_action])
+    hidden_1 = Dense(256, activation='relu')(merged)
+    hidden_2 = Dense(128, activation='relu')(hidden_1)
+    hidden_3 = Dense(64, activation='relu')(hidden_2)
+    # output layer
+    output = Dense(1, activation='linear')(hidden_3)
+    model = Model(inputs=[inputs_observation, inputs_action], outputs=output)
+    #print(model.summary())
+
+    q_learning_tester = QLearningTester(env_config=env_config, policy=policy,
+                                        model=model, memory=SequentialMemory(limit=50000, window_length=1),
+                                        temporal_offsets=[1, 2, 5], log_interval=steps_per_epoch, processor=SVSProcessor(),
+                                        goal=collision_goal, optimizer=optimizer,
+                                        folder_path=q_learning_folder, metrics=metrics, failure=failure_1)
+
+    return q_learning_tester
 
 
 def plot(steps, values_1, values_2, values_3):
@@ -138,90 +180,33 @@ def process_failures(steps, failures):
     return {'avgs': avgs, 'stddev': stddev, 'maxima': maxima, 'minima' : minima}
 
 
-def test_q_learner(goal):
+def evaluate(testers, env, goal_param_func, nb_steps):
     failures = []
-    for i in range(epochs_per_tester):
-        inputs_observation = Input(shape=(1, 8))
-        flatten_inputs_observations = Flatten()(inputs_observation)
-        inputs_action = Input(shape=test_env.env_config.test_action_shape)
-        # hidden layers
-        merged = concatenate([flatten_inputs_observations, inputs_action])
-        hidden_1 = Dense(256, activation='relu')(merged)
-        hidden_2 = Dense(128, activation='relu')(hidden_1)
-        hidden_3 = Dense(64, activation='relu')(hidden_2)
-        # output layer
-        output = Dense(1, activation='linear')(hidden_3)
-        model = Model(inputs=[inputs_observation, inputs_action], outputs=output)
-
-        q_policy = LinearAnnealedPolicy(EpsGreedyQPolicy(), attr='eps', value_max=1., value_min=.05, value_test=.05,
-                                        nb_steps=5000)
-
-        q_learning_tester = QLearningTester(env_config=test_env.env_config, policy=q_policy,
-                                            model=model, memory=SequentialMemory(limit=50000, window_length=1),
-                                            temporal_offsets=[1, 2, 5], log_interval=100, processor=SVSProcessor(),
-                                            goal=goal, optimizer=optimizer,
-                                            folder_path=q_learning_folder, metrics=metrics)
-
-        failures.append(q_learning_tester.fit(goal_param_func=collision_goal_param_func, nb_steps=steps_per_epoch,
-                                              test_env=test_env, nb_max_episode_steps=10))
-    return failures
+    for tester in testers:
+        failures.append(tester.fit(goal_param_func=goal_param_func, nb_steps=nb_steps,
+                                       test_env=env, nb_max_episode_steps=10))
+    logs = process_failures(steps=steps, failures=failures)
+    return logs, failures
 
 
-def test_dfp():
-    failures = []
-    for i in range(epochs_per_tester):
-        model = load_model(test_env.env_config)
-        standard_tester = AdfpTester(env_config=test_env.env_config,
-                                     policy=DecreasingEpsilonGreedyPolicy(steps=5000, start_eps=1, end_eps=0.05),
-                                     model=model, memory=DefaultMemory(max_length=50000), temporal_offsets=[1, 2, 5],
-                                     log_interval=100, processor=SVSProcessor(), goal=collision_goal,
-                                     optimizer=optimizer, folder_path=dfp_folder, metrics=metrics)
-
-        failures.append(standard_tester.fit(goal_param_func=collision_goal_param_func, nb_steps=steps_per_epoch,
-                                            test_env=test_env, nb_max_episode_steps=10))
-    return failures
+def failure_1(observation):
+    if point_in_rect(observation.obstacle_left_bottom, observation.obstacle_width,
+                  observation.obstacle_height, observation.robot_position):
+        return True
+    return False
 
 
-def test_random():
-    failures = []
-    for i in range(epochs_per_tester):
-        model = load_model(test_env.env_config)
-        random_tester = AdfpTester(env_config=test_env.env_config, policy=RandomPolicy(), model=model,
-                                   memory=DefaultMemory(max_length=50000), temporal_offsets=[1, 2, 5],
-                                   log_interval=100, processor=SVSProcessor(), goal=goal, optimizer=optimizer,
-                                   folder_path=random_folder, metrics=metrics)
-
-        failures.append(
-            random_tester.fit(goal_param_func=collision_goal_param_func, nb_steps=steps_per_epoch, test_env=test_env,
-                              nb_max_episode_steps=10))
-    return failures
-
-
-def test_the_testers(step):
-    # QLearning Tester
-    q_learner_failures = test_q_learner(goal=collision_goal)
-    logs_q_learner = process_failures(steps=steps, failures=q_learner_failures)
-    with open('q_learning_tester_step_' + str(step) + '.json', 'w') as outfile:
-        json.dump(logs_q_learner, outfile)
-
-    # Standard Tester
-    standard_failures = test_dfp()
-    logs_dfp = process_failures(steps=steps, failures=standard_failures)
-    with open('dfp_tester_step_'+ str(step) + '.json', 'w') as outfile:
-        json.dump(logs_dfp, outfile)
-
-    # Random Tester
-    random_failures = test_random()
-    logs_random_tester = process_failures(steps=steps, failures=random_failures)
-    with open('random_tester_step_' + str(step) + '.json', 'w') as outfile:
-        json.dump(logs_random_tester, outfile)
+def failure_2(observation):
+    if point_in_rect((0, 1), 1, 1, observation.robot_position):
+        return True
+    return False
 
 
 if __name__ == '__main__':
 
     # goals: collision_goal and goal
 
-    steps_per_epoch = 1000
+    steps_per_epoch = 10000
     epochs_per_tester = 10
 
     steps = np.linspace(0, steps_per_epoch, 100)
@@ -238,14 +223,85 @@ if __name__ == '__main__':
     test_env = SVSTestEnv(weights_filename=weights_filename)
 
     # test with the 3 testers
-    test_the_testers(1)
+    policy_steps = 5000
 
-    # Load test environment for 1000k steps
-    weights_filename = '../dqn_SVS_weights_1000k.h5f'
-    test_env = SVSTestEnv(weights_filename=weights_filename)
+    q_learning_testers = [load_q_model(env_config=test_env.env_config, policy=LinearAnnealedPolicy(EpsGreedyQPolicy(), attr='eps', value_max=1., value_min=.05, value_test=.05,
+                                    nb_steps=policy_steps)) for i in range(epochs_per_tester)]
+    dfp_testers = [load_dfp_model(env_config=test_env.env_config, policy=DecreasingEpsilonGreedyPolicy(steps=policy_steps, start_eps=1, end_eps=0.05)) for i in range(epochs_per_tester)]
+    random_testers = [load_dfp_model(env_config=test_env.env_config, policy=RandomPolicy()) for i in range(epochs_per_tester)]
 
-    # test with the 3 testers again
-    test_the_testers(2)
+    if True:
+        if False:
+            print("===== Starting with Q-Learning Tester =====")
+            logs_q_learner, _ = evaluate(q_learning_testers, test_env, collision_goal_param_func, steps_per_epoch)
+            with open('logs/q_learning_tester_step_1.json', 'w') as outfile:
+                json.dump(logs_q_learner, outfile)
+
+        print("===== Starting with DFP Tester =====")
+        logs_dfp, failures = evaluate(dfp_testers, test_env, collision_goal_param_func, steps_per_epoch)
+        with open('logs/dfp_tester_step_1.json', 'w') as outfile:
+            json.dump(logs_dfp, outfile)
+        # Save reached failures for analysis
+        with open('logs/dfp_failure_data.pkl', 'wb') as output:
+            pickle.dump(failures, output, pickle.HIGHEST_PROTOCOL)
+
+        if False:
+            print("===== Starting with Random Tester =====")
+            logs_random_tester, _ = evaluate(random_testers, test_env, collision_goal_param_func, steps_per_epoch)
+            with open('logs/random_tester_step_1.json', 'w') as outfile:
+                json.dump(logs_random_tester, outfile)
+
+        # Save weights of dfp_testers
+        #for i in range(len(dfp_testers)):
+        #    path = os.path.abspath(dfp_folder + '/agent_' + str(i))
+        #    print(path)
+        #    dfp_testers[i].adfp_agent.save(path)
+
+    if False:
+        print("Starting to evaluate the goal generalization property of DFP and DQN")
+        for tester in dfp_testers:
+            tester.failure = failure_2
+        logs_dfp, _ = evaluate(dfp_testers, test_env, collision_goal_param_func_v2, steps_per_epoch)
+        with open('logs/dfp_tester_step_generalization.json', 'w') as outfile:
+            json.dump(logs_dfp, outfile)
+        for tester in q_learning_testers:
+            tester.failure = failure_2
+        logs_q_learner, _ = evaluate(q_learning_testers, test_env, collision_goal_param_func_v2, steps_per_epoch)
+        with open('logs/q_learning_tester_step_generalization.json', 'w') as outfile:
+            json.dump(logs_q_learner, outfile)
+
+    if True:
+        print("Starting to evaluate the interstep-generalization property of DFP")
+        # Load test environment for 1000k steps
+        weights_filename = '../dqn_SVS_weights_1000k.h5f'
+        prev_config = test_env.env_config
+        test_env = SVSTestEnv(weights_filename=weights_filename)
+        test_env.env_config = prev_config  # TODO do this by appropriate equals method in EnvConfig
+
+        free_dfp_testers = [load_dfp_model(env_config=test_env.env_config,
+                            policy=DecreasingEpsilonGreedyPolicy(steps=policy_steps, start_eps=1, end_eps=0.05))
+                            for i in range(epochs_per_tester)]
+
+        print("===== Starting with pre-learned DFP Tester =====")
+        # Load weights of dfp_testers
+        for i in range(len(dfp_testers)):
+            tester = dfp_testers[i]
+            tester.adfp_agent.policy = DecreasingEpsilonGreedyPolicy(steps=policy_steps, start_eps=0.5, end_eps=0.05)
+            tester.failure = failure_2
+        logs_dfp, _ = evaluate(dfp_testers, test_env, collision_goal_param_func_v2, steps_per_epoch)
+        with open('logs/dfp_tester_step_2.json', 'w') as outfile:
+            json.dump(logs_dfp, outfile)
+
+        print("===== Starting with free DFP Tester =====")
+        for tester in free_dfp_testers:
+            tester.failure = failure_2
+        logs_dfp, failures = evaluate(free_dfp_testers, test_env, collision_goal_param_func_v2, steps_per_epoch)
+        with open('logs/dfp_tester_step_2_free.json', 'w') as outfile:
+            json.dump(logs_dfp, outfile)
+        with open('logs/dfp_failure_data_test.pkl', 'wb') as output:
+            pickle.dump(failures, output, pickle.HIGHEST_PROTOCOL)
+
+
 
 
     # AdfpTester(env_config=test_env.env_config,

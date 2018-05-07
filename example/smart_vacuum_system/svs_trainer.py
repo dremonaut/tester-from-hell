@@ -1,3 +1,5 @@
+import os
+os.environ['KERAS_BACKEND'] = "theano"
 from rl.agents import DQNAgent
 from example.smart_vacuum_system.svs_environment import SVSCtx, State, avoid_obstacle_reward, CFMProcessor, point_in_rect
 from keras.models import Sequential
@@ -46,15 +48,18 @@ if __name__ == '__main__':
     parser.add_argument('--mode', choices=['train', 'test'], default='test')
     args = parser.parse_args()
 
-    weights_filename = 'dqn_SVS_weights_500k.h5f'
+    weights_filename_1 = 'dqn_SVS_weights_500k.h5f'
+    weights_filename_2 = 'dqn_SVS_weights_1000k.h5f'
     dqn = load_agent(environment=env)
 
     if args.mode == 'train':
         log_filename = 'dqn_SVS_log.json'
         callbacks = [FileLogger(log_filename, interval=100)]
         dqn.fit(env, nb_steps=500000, visualize=False, nb_max_episode_steps=20)
-        dqn.save_weights(weights_filename, overwrite=True)
+        dqn.save_weights(weights_filename_1, overwrite=True)
+        dqn.fit(env, nb_steps=500000, visualize=False, nb_max_episode_steps=20)
+        dqn.save_weights(weights_filename_2, overwrite=True)
 
     elif args.mode == 'test':
-        dqn.load_weights(weights_filename)
+        dqn.load_weights(weights_filename_2)
         dqn.test(env, nb_episodes=10, nb_max_episode_steps=50, visualize=True)
