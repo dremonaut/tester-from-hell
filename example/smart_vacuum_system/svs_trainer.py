@@ -1,5 +1,5 @@
 import os
-os.environ['KERAS_BACKEND'] = "theano"
+#os.environ['KERAS_BACKEND'] = "theano"
 from rl.agents import DQNAgent
 from example.smart_vacuum_system.svs_environment import SVSCtx, State, avoid_obstacle_reward, CFMProcessor, point_in_rect
 from keras.models import Sequential
